@@ -234,32 +234,154 @@ void *my_malloc(size_t size) {
  * See my_malloc.h for documentation
  */
 void *my_realloc(void *ptr, size_t size) {
-    UNUSED_PARAMETER(ptr);
-    UNUSED_PARAMETER(size);
-    return NULL;
+    //UNUSED_PARAMETER(ptr);
+    //UNUSED_PARAMETER(size);
+    if(ptr == NULL) {
+    	my_malloc_errno = NO_ERROR;
+    	return my_malloc(size);
+    }
+    if(size == 0) {
+    	my_malloc_errno = NO_ERROR;
+    	my_free(ptr);
+    	return NULL;
+    }
+
+    //get metadata for ptr
+    metadata_t* blockMeta = (metadata_t*)((uint8_t*)ptr - sizeof(metadata_t));
+    //check head canary
+    if(blockMeta->canary != ((uintptr_t) blockMeta ^ CANARY_MAGIC_NUMBER) - blockMeta->size) {
+    	my_malloc_errno = CANARY_CORRUPTED;
+    	return NULL;
+    }
+    //check tail canary
+    if(*((unsigned int*)((uint8_t*)blockMeta + blockMeta->size - sizeof(int))) != ((uintptr_t) blockMeta ^ CANARY_MAGIC_NUMBER) - blockMeta->size) {
+    	my_malloc_errno = CANARY_CORRUPTED;
+    	return NULL;
+    }
+
+    void* newBlock = my_malloc(size);
+    if(newBlock == NULL) {
+    	return NULL;
+    }
+    size_t oldSize = (blockMeta->size - TOTAL_METADATA_SIZE);
+    if(oldSize < size) {
+	    for(unsigned int i = 0; i < oldSize; i++) {
+	    	memcpy((uint8_t*)newBlock + i, (uint8_t*)ptr + i, sizeof(uint8_t));
+		}
+	} else {
+		for(unsigned int i = 0; i < size; i++) {
+	    	memcpy((uint8_t*)newBlock + i, (uint8_t*)ptr + i, sizeof(uint8_t));
+	    }
+	}
+	my_free(ptr);
+    return newBlock;
 }
 
 /* CALLOC
  * See my_malloc.h for documentation
  */
 void *my_calloc(size_t nmemb, size_t size) {
-    UNUSED_PARAMETER(nmemb);
-    UNUSED_PARAMETER(size);
-    return NULL;
+    //UNUSED_PARAMETER(nmemb);
+    //UNUSED_PARAMETER(size);
+    my_malloc_errno = NO_ERROR;
+    void* block = my_malloc(size*nmemb);
+    if(block == NULL) {
+    	return NULL;
+    }
+    for(unsigned int i = 0; i < size*nmemb; i++) {
+    	*((uint8_t*)block + i) = (uint8_t)0;
+    }
+    return block;
 }
 
 /* FREE
  * See my_malloc.h for documentation
  */
 void my_free(void *ptr) {
-    UNUSED_PARAMETER(ptr);
+    // UNUSED_PARAMETER(ptr);
     //set error to no
+    my_malloc_errno = NO_ERROR;
     //check if ptr is null
-    //get pointer to metadata (ptr - sizeof(metadata-t*))
+    if(ptr == NULL) {
+    	return ;
+    }
+    //get pointer to metadata (ptr - sizeof(metadata-t))
+    metadata_t* freed = (metadata_t*)((uint8_t*)ptr - sizeof(metadata_t));
     //check head canary
+    if(freed->canary != ((uintptr_t) freed ^ CANARY_MAGIC_NUMBER) - freed->size) {
+    	my_malloc_errno = CANARY_CORRUPTED;
+    	return ;
+    }
     //check tail canary
+    if(*(unsigned int*)((uint8_t*)freed + freed->size - sizeof(int)) != (((uintptr_t) freed ^ CANARY_MAGIC_NUMBER) - freed->size)) {
+    	my_malloc_errno = CANARY_CORRUPTED;
+    	return ;
+    }
     //check left for merging possibility
-    	//loop until cur-> next is freed block
+    	//loop until cur + cur.size is freed block pointer
+    	//if cur == null - no need to left merge
+    metadata_t* lcur = freelist;
+    metadata_t* lprev = NULL;
+    while(lcur != NULL && (metadata_t*)((uint8_t*)lcur + lcur->size) != freed) {
+    	lprev = lcur;
+    	lcur = lcur->next;
+    }
+    //needs to merge left
+    if(lcur != NULL && (metadata_t*)((uint8_t*)lcur + lcur->size) == freed) {
+    	//update cur size, head canary
+    	lcur->size = lcur->size + freed->size;
+    	lcur->canary = ((uintptr_t) lcur ^ CANARY_MAGIC_NUMBER) - lcur->size;
+    	//remove cur from freelist
+    	//remove from front
+    	if(lprev == NULL) {
+    		freelist = lcur->next;
+    	} else {
+    		lprev->next = lcur->next;
+    	}
+    	freed = lcur;
+    }
     //check right for merging possibility
+    	//loop until freed pointer + size is cur
+    	//if cur == null - no need to right merge
+    metadata_t* rcur = freelist;
+    metadata_t* rprev = NULL;
+    while(rcur != NULL && (metadata_t*)((uint8_t*)freed + freed->size) != rcur) {
+    	rprev = rcur;
+    	rcur = rcur->next;
+    }
+    if(rcur != NULL && (metadata_t*)((uint8_t*)freed + freed->size) == rcur) {
+    	//update freed pointer size and head canary
+    	freed->size = freed->size + rcur->size;
+    	freed->canary = ((uintptr_t) freed ^ CANARY_MAGIC_NUMBER) - freed->size;
+    	//remove cur from freelist
+    	//remove from front
+    	if(rprev == NULL) {
+    		freelist = rcur->next;
+    	} else {
+    		rprev->next = rcur->next;
+    	}
+    }
 
+    //add either the freed block, freed block merged with right, or merged left block
+    metadata_t* cur = freelist;
+    metadata_t* prev = NULL;
+    while(cur != NULL && cur->size < freed->size) {
+    	prev = cur;
+    	cur = cur->next;
+    }
+    //insert at front
+    if (prev == NULL) {
+    	freed->next = freelist;
+    	freelist = freed;
+    }
+    //insert at back
+    else if(cur == NULL) {
+    	prev->next = freed;
+    	freed->next = NULL;
+    }
+    //insert at middle
+    else {
+    	prev->next = freed;
+    	freed->next = cur;
+    }
 }
